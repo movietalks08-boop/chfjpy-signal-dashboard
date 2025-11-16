@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Neon FX Signal Dashboard — CHF/JPY (with Expiry)</title>
+<style>
+    body {
+        background: #000000;
+        font-family: 'Segoe UI', sans-serif;
+        color: #00ffea;
+        margin: 0;
+        padding: 20px;
+    }
+    h1 {
+        text-align: center;
+        color: #00fff7;
+        text-shadow: 0 0 10px #00fff7;
+        margin-bottom: 6px;
+    }
+    .card {
+        background: #0c0c0c;
+        border: 2px solid #00ffe5;
+        box-shadow: 0 0 25px #00ffe5;
+        padding: 20px;
+        margin: auto;
+        max-width: 700px;
+        border-radius: 15px;
+    }
+    button {
+        width: 100%;
+        padding: 12px;
+        background: #00ffe0;
+        border: none;
+        color: #000;
+        font-size: 16px;
+        border-radius: 10px;
+        cursor: pointer;
+        box-shadow: 0 0 15px #00ffe0;
+    }
+    button:hover { background: #00b39f; }
+    .row { display:flex; gap:12px; margin-top:12px; }
+    .col { flex:1; }
+    label { display:block; font-size:13px; color:#9fffe9; margin-bottom:6px; }
+    select, input[type="number"] {
+        width:100%; padding:8px; border-radius:8px; border:1px solid #012; background:#061616; color:#cffff7;
+    }
+    .signal-box {
+        font-size: 20px;
+        text-align: center;
+        padding: 15px;
+        margin-top: 18px;
+        border-radius: 10px;
+        border: 2px solid #fff;
+        text-shadow: 0 0 10px;
+    }
+    .buy { color: #00ff9c; border-color: #00ff9c; box-shadow: 0 0 12px #00ff9c; }
+    .sell { color: #ff007a; border-color: #ff007a; box-shadow: 0 0 12px #ff007a; }
+    .neutral { color: #a0a0a0; border-color: #a0a0a0; box-shadow: none; }
+    .meta { margin-top:10px; font-size:13px; color:#9fffe9; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .countdown { font-weight:700; color:#fff; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,0.25); }
+    .small { font-size:12px; color:#bfeee7; }
+</style>
+</head>
+<body>
+<h1>NEON FX SIGNAL DASHBOARD — CHF/JPY</h1>
+
+<div class="card">
+    <h2 style="color:#00ffe0;text-align:center;">Live Signal</h2>
+
+    <div class="row">
+        <div class="col">
+            <label for="expiry_select">Signal expiry</label>
+            <select id="expiry_select">
+                <option value="15">15 seconds</option>
+                <option value="30" selected>30 seconds</option>
+                <option value="60">1 minute</option>
+                <option value="300">5 minutes</option>
+                <option value="600">10 minutes</option>
+            </select>
+        </div>
+
+        <div class="col">
+            <label for="auto_refresh">Auto-refresh interval (sec)</label>
+            <select id="auto_refresh">
+                <option value="0" selected>Off</option>
+                <option value="15">15</option>
+                <option value="30">30</option>
+                <option value="60">60</option>
+            </select>
+        </div>
+    </div>
+
+    <div style="margin-top:12px;">
+        <button id="get_signal_btn">Get Neon Signal</button>
+    </div>
+
+    <div id="signal" class="signal-box neutral">Waiting for signal...</div>
+
+    <div class="meta">
+        <div class="small">Price: <span id="price">—</span></div>
+        <div class="small">RSI: <span id="rsi">—</span>  EMA: <span id="ema">—</span></div>
+        <div class="countdown" id="expires_in">Expires in: —</div>
+    </div>
+
+    <div style="margin-top:12px; font-size:12px; color:#9fffe9;">
+        <div>Notes: The expiry timer clears the displayed signal once time runs out. Replace <code>YOUR_API_KEY</code> below with your Twelve Data key.</div>
+    </div>
+</div>
+
+<script>
+(() => {
+    // Config: replace with your Twelve Data key
+    const API_KEY = "YOUR_API_KEY";
+    const SYMBOL = "CHFJPY"; // Twelve Data uses symbol without slash for some endpoints
+    const INTERVAL = "1min";
+    const OUTPUTSIZE = 20;
+
+    // UI elements
+    const btn = document.getElementById("get_signal_btn");
+    const signalBox = document.getElementById("signal");
+    const priceEl = document.getElementById("price");
+    const rsiEl = document.getElementById("rsi");
+    const emaEl = document.getElementById("ema");
+    const expiresEl = document.getElementById("expires_in");
+    const expirySelect = document.getElementById("expiry_select");
+    const autoRefresh = document.getElementById("auto_refresh");
+
+    let expiryTimerId = null;    // timeout that clears signal
+    let countdownInterval = null; // interval to update remaining time on UI
+    let expiryEpochMs = null;    // timestamp when signal expires
+    let autoRefreshId = null;
+
+    function clearExistingTimers() {
+        if (expiryTimerId) { clearTimeout(expiryTimerId); expiryTimerId = null; }
+        if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+    }
+
+    function setExpiry(durationSeconds) {
+        clearExistingTimers();
+        expiryEpochMs = Date.now() + durationSeconds * 1000;
+
+        // timer to clear UI
+        expiryTimerId = setTimeout(() => {
+            setNeutral("Signal expired");
+            expiryEpochMs = null;
+            expiresEl.textContent = "Expires in: —";
+        }, durationSeconds * 1000);
+
+        // countdown UI updater every 250ms
+        countdownInterval = setInterval(() => {
+            const msLeft = expiryEpochMs - Date.now();
+            if (msLeft <= 0) {
+                expiresEl.textContent = "Expires in: 0s";
+                // will be cleared by timeout shortly
+                return;
+            }
+            const s = Math.ceil(msLeft / 1000);
+            expiresEl.textContent = `Expires in: ${s}s`;
+        }, 250);
+    }
+
+    function setNeutral(text = "No clear signal") {
+        signalBox.textContent = text;
+        signalBox.className = "signal-box neutral";
+        priceEl.textContent = "—";
+        rsiEl.textContent = "—";
+        emaEl.textContent = "—";
+        expiresEl.textContent = "Expires in: —";
+        clearExistingTimers();
+    }
+
+    function setBuy(price, rsi, ema) {
+        signalBox.textContent = `BUY Signal (Oversold + Trend Up) | Price: ${price.toFixed(3)}`;
+        signalBox.className = "signal-box buy";
+        priceEl.textContent = price.toFixed(3);
+        rsiEl.textContent = rsi.toFixed(2);
+        emaEl.textContent = ema.toFixed(3);
+    }
+
+    function setSell(price, rsi, ema) {
+        signalBox.textContent = `SELL Signal (Overbought + Trend Down) | Price: ${price.toFixed(3)}`;
+        signalBox.className = "signal-box sell";
+        priceEl.textContent = price.toFixed(3);
+        rsiEl.textContent = rsi.toFixed(2);
+        emaEl.textContent = ema.toFixed(3);
+    }
+
+    async function fetchSeries() {
+        // Use Twelve Data time_series endpoint
+        const url = `https://api.twelvedata.com/time_series?symbol=${SYMBOL}&interval=${INTERVAL}&outputsize=${OUTPUTSIZE}&format=JSON&apikey=${API_KEY}`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const j = await resp.json();
+        if (!j.values) throw new Error("API returned no values: " + JSON.stringify(j));
+        // values are typically newest first; map to numbers and ensure oldest->newest
+        const vals = j.values.slice().reverse().map(v => ({ 
+            close: parseFloat(v.close), open: parseFloat(v.open||v.close) 
+        }));
+        return vals;
+    }
+
+    // simple EMA (uses oldest->newest array)
+    function calcEMA(prices, period) {
+        const k = 2 / (period + 1);
+        let ema = prices[0];
+        for (let i = 1; i < prices.length; i++) {
+            ema = prices[i] * k + ema * (1 - k);
+        }
+        return ema;
+    }
+
+    // simple RSI (SMA version on gains/losses)
+    function calcRSI(prices, period = 14) {
+        if (prices.length <= period) return 50;
+        let gains = 0, losses = 0;
+        for (let i = 1; i <= period; i++) {
+            const diff = prices[i] - prices[i - 1];
+            if (diff > 0) gains += diff;
+            else losses -= diff;
+        }
+        const avgGain = gains / period;
+        const avgLoss = losses / period || 1e-9;
+        const rs = avgGain / avgLoss;
+        const rsi = 100 - 100 / (1 + rs);
+        return rsi;
+    }
+
+    async function generateSignal() {
+        try {
+            btn.disabled = true; btn.textContent = "Fetching...";
+            const data = await fetchSeries();
+            const closes = data.map(d => d.close);
+            const price = closes[closes.length - 1];
+            // choose indicator params (you can make these configurable)
+            const emaPeriod = 14;
+            const rsiPeriod = 14;
+
+            const ema = calcEMA(closes, emaPeriod);
+            const rsi = calcRSI(closes, rsiPeriod);
+
+            // signal logic: BUY when RSI < 30 and price > EMA, SELL when RSI > 70 and price < EMA
+            if (rsi < 30 && price > ema) {
+                setBuy(price, rsi, ema);
+            } else if (rsi > 70 && price < ema) {
+                setSell(price, rsi, ema);
+            } else {
+                setNeutral("No clear signal");
+                btn.disabled = false; btn.textContent = "Get Neon Signal";
+                return;
+            }
+
+            // set expiry timer based on user choice
+            const durationSec = parseInt(expirySelect.value, 10) || 30;
+            setExpiry(durationSec);
+
+        } catch (err) {
+            console.error(err);
+            setNeutral("Error fetching signal");
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "Get Neon Signal";
+        }
+    }
+
+    // auto-refresh handling
+    function updateAutoRefresh() {
+        const val = parseInt(autoRefresh.value, 10) || 0;
+        if (autoRefreshId) {
+            clearInterval(autoRefreshId);
+            autoRefreshId = null;
+        }
+        if (val > 0) {
+            autoRefreshId = setInterval(() => {
+                document.getElementById("get_signal_btn").click();
+            }, val * 1000);
+        }
+    }
+
+    // wire events
+    btn.addEventListener("click", generateSignal);
+    expirySelect.addEventListener("change", () => {
+        // if a signal is active, extend/shorten expiry to new value from 'now'
+        if (expiryEpochMs) {
+            const durationSec = parseInt(expirySelect.value,10) || 30;
+            setExpiry(durationSec);
+        }
+    });
+    autoRefresh.addEventListener("change", updateAutoRefresh);
+
+    // initialize
+    setNeutral("Waiting for signal...");
+    updateAutoRefresh();
+
+})();
+</script>
+</body>
+</html>
+
+      
+
+
+
+      
+       
